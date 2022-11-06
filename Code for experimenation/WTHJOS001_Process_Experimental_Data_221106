@@ -1,0 +1,190 @@
+
+using PortAudio
+#using SampledSignals
+using Plots
+pyplot()
+using Base 
+using Base.Threads: @spawn
+using WAV
+using FFTW
+using LinearAlgebra #library used to get the distance between the various points on the map using the norm function
+#using PlotlyJS
+
+function pulse_t(t, pulse_len,pulse_freq,BW)
+    A = 0.5 #amplitude of the singal
+    rect(t) = (abs.(t) .<= 0.5) * 1.0 #(abs.(t).<=0.5)*1.0; creates a rect function
+    #BW = 5000
+    sweep_rate = BW / pulse_len
+    pulse(t) = A * rect.((t .- pulse_len / 2) / pulse_len) .* cos.(2 * pi * (pulse_freq .* (t .- pulse_len / 2) + 0.5 * sweep_rate * (t .- pulse_len / 2) .^ 2)) #shifting where the tranmitted singal occurs to the centre and the other stretches the signal, the signal now starts at zero and ends at the pulse length.
+    #display(plot(pulse(t_Tx)))
+    return pulse(t)
+end
+
+function time_between_direct_and_reflected(read_current, v_p, t_axis, ω, N_samples_R, dt, c, BW, pulse_freq, f, pulse_len)
+
+    inv_analytic_blackman_time = read_current
+
+    first=0
+    first_index=0
+    second=0
+    second_index=0
+
+    for i=2:N_samples_R-1
+        current = inv_analytic_blackman_time[i];
+        previous= inv_analytic_blackman_time[i-1];
+        next= inv_analytic_blackman_time[i+1];
+        if  current>previous && current>next && current>first
+            second = first;
+            second_index = first_index
+            first = current;
+            first_index= i-1
+        elseif  current>previous && current>next && current>second
+            second=current
+            second_index=i-1
+        end
+    end
+
+    tau_difference = (second_index-first_index)*dt
+
+    return tau_difference
+
+end
+
+function locations_of_devices_and_object(Px,Py,Pz,distance_moved_x,distance_moved_y,distance_moved_z)
+    Tx = [0; 0] #the transimitter position
+    #Rx_at_Tx=[.1;0;0] #for the intial simuation purposes we will assume that this is bascially on top of the transmitter
+    Rx2 = [0.5; 1.5] #the recieve position
+    P = [Px+distance_moved_x; Py+distance_moved_y] #the objects poisiton
+    Rx3 = [1.5; 0.5]
+    Rx1 = [0; 0.5]
+    P_initialized =[Px;Py]
+    #P_moved_only = [Px+distance_moved_x;Py+distance_moved_y;Pz+distance_moved_z]
+    #println(P," location of object that has moved")
+    return P, Tx, Rx1, Rx2, Rx3
+
+end
+
+
+function Test_trial_point(TP,TX,RX1,RX2,RX3, tau_Rx1_input, tau_Rx2_input, tau_Rx3_input,ct) #tau_Rxn_input is the tau that i have found
+   
+    dist_TX_TP = norm(-TX+TP) #temporary distance from tranmitter to trial point
+    dist_TP_RX1 = norm(-TP+RX1) #temporary distance from the trial point to Rx1
+    dist_TP_RX2 = norm(-TP+RX2) #temporary distance from the trial point to Rx2
+    dist_TP_RX3 = norm(-TP+RX3) #temporary distance from the trial point to Rx3
+
+    tau_TX_TP_RX1 = (dist_TX_TP+dist_TP_RX1)/ct #trial point tau value for RX1
+    tau_TX_TP_RX2 = (dist_TX_TP+dist_TP_RX2)/ct #trial point tau value for RX2
+    tau_TX_TP_RX3 = (dist_TX_TP+dist_TP_RX3)/ct #trial point tau value for RX3
+
+    error_RX1 = (tau_Rx1_input - tau_TX_TP_RX1)^2 #measured tau for Rx1 minus the tau for the trial point from Tx to trial point to RX1 all sqaured
+    error_RX2 = (tau_Rx2_input - tau_TX_TP_RX2)^2 #measured tau for Rx2 minus the tau for the trial point from Tx to trial point to RX2 all sqaured
+    error_RX3 = (tau_Rx3_input - tau_TX_TP_RX3)^2 #measured tau for Rx3 minus the tau for the trial point from Tx to trial point to RX3 all sqaured
+
+    cost = ((1/2)*(error_RX1+error_RX2+error_RX3))^0.5
+end
+
+
+function find_location(Tx, Rx1, Rx2, Rx3, tau_Tx_P_Rx1, tau_Tx_P_Rx2, tau_Tx_P_Rx3, c, dt)
+    #creating a matrix to repreenst the room
+    x0 = 0
+    y0 = 0
+    z0 = 0
+    xdim = 4
+    ydim = 4
+    zdim = 5
+    dx = 0.01
+    dy = 0.01
+    dz = 0.01
+    Nx = Int(round(xdim / dx)) + 1
+    Ny = Int(round(ydim / dy)) + 1
+    Nz = Int(round(zdim / dz)) + 1
+
+    x_axis = x0:dx:(Nx-1)*dx
+    y_axis = y0:dy:(Ny-1)*dy
+
+    Store_cost_function = zeros(Nx, Ny)
+
+    #below just runs through the entire 2D map and tests the trial_point in cmparsion to the Tau values found
+    for i = 1:Nx
+        for j = 1:Ny
+            x = x0 + (i - 1) * dx
+            y = y0 + (j - 1) * dy
+            Trial_point = [x, y]
+            Store_cost_function[i, j] = Test_trial_point(Trial_point, Tx, Rx1, Rx2, Rx3, tau_Tx_P_Rx1, tau_Tx_P_Rx2, tau_Tx_P_Rx3, c)
+
+        end
+    end
+    
+    min_point = findmin(Store_cost_function)
+    display(surface((Store_cost_function')))
+
+    x_min = (min_point[2][1] - 1) * dx + x0 #subtract one becasue the index starts at 1 and not zero the other math is covnerting from cartesian to how the plot axis are defeined
+    y_min = (min_point[2][2] - 1) * dy + y0 #subtract one becasue the index starts at 1 and not zero the other math is covnerting from cartesian to how the plot axis are defeined
+    #z_min = (min_point[2][3] - 1) * dz + z0 #subtract one becasue the index starts at 1 and not zero the other math is covnerting from cartesian to how the plot axis are defeined
+
+    return x_min, y_min
+end
+
+
+function main()
+    sample_rate = 44100 # sample rate for the signal processing
+
+    dt = 1 / sample_rate #defining the tick rate for the signal time frame
+
+    BW = 2000
+
+    pulse_len = 0.05 #short pulse len
+
+    t_rec = 0.5 #recording time of microphones
+
+    pulse_freq = 13000 #frequency of the pulse
+
+    N_samples_T = Int(round(pulse_len / dt))
+
+    N_samples_R = Int(round(t_rec / dt))
+
+    t_Tx = (0:N_samples_T-1) * dt
+
+    t_axis = 0:dt:(N_samples_R-1)*dt #defines the time axis for plotting
+
+    c = 331 * sqrt(1 + 25 / 273) #speed of light at 25 degrees celcius - assumed tmeperature for expreiment
+
+    lambda = c / pulse_freq #wave length
+
+    Δω = 2 * pi / (N_samples_R * dt) # Sample spacing in freq domain in rad/s
+    ω = 0:Δω:(N_samples_R-1)*Δω
+    f = ω / (2 * π)
+
+    pulse_shift_factor = 4
+    v_pulse_1 = pulse_t(t_axis, pulse_len, pulse_freq, BW) #propagated singal that is not yet truncated
+
+    v_pulse = v_pulse_1
+    #the PSD for white nosie can be classifed by being equal N0/2 for frewuency within 2B cntered at f=0
+
+    for i in 1:10
+
+        v_Rx1 = wavread("output_of_inverse_filter_with_blakcman_filter_for_mic_with_tape_in_time_domain_$i.wav", Fs=44100)
+        v_Rx3 = wavread("output_of_inverse_filter_with_blakcman_filter_for_mic_with_prestick_in_time_domain_$i.wav", Fs=44100)
+        v_Rx2 = wavread("output_of_inverse_filter_with_blakcman_filter_for_mic_with_nothing_in_time_domain_$i.wav", Fs=44100)
+
+        v_Rx1 = v_Rx1[1]
+        v_Rx2 = v_Rx2[1]
+        v_Rx3 = v_Rx3[1]
+
+        tau_diff_rx1 = time_between_direct_and_reflected(v_Rx1, v_pulse_1, t_axis, ω, N_samples_R, dt, c, BW, pulse_freq, f, pulse_len)
+        tau_diff_rx2 = time_between_direct_and_reflected(v_Rx2, v_pulse_1, t_axis, ω, N_samples_R, dt, c, BW, pulse_freq, f, pulse_len)
+        tau_diff_rx3 = time_between_direct_and_reflected(v_Rx3, v_pulse_1, t_axis, ω, N_samples_R, dt, c, BW, pulse_freq, f, pulse_len)
+
+        tau_Rx1 = tau_Tx_Rx1 + tau_diff_rx1
+        tau_Rx2 = tau_Tx_Rx2 + tau_diff_rx2
+        tau_Rx3 = tau_Tx_Rx3 + tau_diff_rx3
+
+        location = find_location(Tx, Rx1, Rx2, Rx3, tau_Rx1, tau_Rx2, tau_Rx3, c, dt)
+        println("the object is found to be here: ", location, " the actual place is: ", P)
+
+
+    end
+
+end
+
+main()
